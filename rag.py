@@ -1,5 +1,9 @@
-
 import os
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 import pickle
 import chromadb
 from dotenv import load_dotenv
@@ -9,6 +13,9 @@ from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from groq import Groq
+
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
 
 PKL_PATH = "data/siri_knowledge.pkl"
 CHROMA_PATH = "data/chroma_db"
