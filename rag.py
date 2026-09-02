@@ -1,5 +1,4 @@
 import os
-
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -9,13 +8,10 @@ import chromadb
 from dotenv import load_dotenv
 
 load_dotenv()
-from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from groq import Groq
 
-torch.set_num_threads(1)
-torch.set_num_interop_threads(1)
 
 PKL_PATH = "data/siri_knowledge.pkl"
 CHROMA_PATH = "data/chroma_db"
@@ -24,32 +20,43 @@ COLLECTION_NAME = "siri_knowledge"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 GROQ_MODEL_NAME = "openai/gpt-oss-20b"
 
-embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
 groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
 with open(PKL_PATH, "rb") as f:
     knowledge = pickle.load(f)
 
 all_chunks = knowledge["chunks"]
-documents = knowledge["documents"]
-embeddings = knowledge["embeddings"]
 
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 collection = chroma_client.get_or_create_collection(
     name=COLLECTION_NAME
 )
 
-ids = [item["id"] for item in all_chunks]
-
 if collection.count() == 0:
-    collection.add(
-        ids=ids,
-        documents=documents,
-        embeddings=embeddings
+    raise RuntimeError(
+        f"Chroma collection '{COLLECTION_NAME}' is empty at {CHROMA_PATH}. "
+        "Populate it first by running data/build_knowledge.py before starting the API."
     )
 
+chunk_by_id = {
+    item["id"]: item
+    for item in all_chunks
+}
+
+_embedding_model = None
+
+def get_embedding_model():
+    global _embedding_model
+
+    if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer
+
+        _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+
+    return _embedding_model
+
 def semantic_search(query, top_k=5):
-    query_embedding = embedding_model.encode(
+    query_embedding = get_embedding_model().encode(
         [query],
         normalize_embeddings=True
     )[0]
@@ -60,7 +67,7 @@ def semantic_search(query, top_k=5):
     )
 
 def rerank(query, top_k=5):
-    query_embedding = embedding_model.encode(
+    query_embedding = get_embedding_model().encode(
         [query],
         normalize_embeddings=True
     )[0]
@@ -73,15 +80,10 @@ def rerank(query, top_k=5):
     candidate_ids = results["ids"][0]
     distances = results["distances"][0]
 
-    data_map = {
-        item["id"]: item
-        for item in all_chunks
-    }
-
     candidates = []
 
     for i, chunk_id in enumerate(candidate_ids):
-        item = data_map.get(chunk_id)
+        item = chunk_by_id.get(chunk_id)
 
         if item is None:
             continue
@@ -159,14 +161,7 @@ def generate_response(query):
 
     best_id = results[0]["id"]
 
-    chunk = next(
-        (
-            item
-            for item in all_chunks
-            if item["id"] == best_id
-        ),
-        None
-    )
+    chunk = chunk_by_id.get(best_id)
 
     if chunk is None:
         return "I don't have enough information to answer that."
