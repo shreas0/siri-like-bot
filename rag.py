@@ -1,5 +1,6 @@
 import os
 import gc
+import json
 import pickle
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -30,6 +31,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from groq import Groq
 
 
+JSON_PATH = "data/siri_knowledge.json"
 PKL_PATH = "data/siri_knowledge.pkl"
 CHROMA_PATH = "data/chroma_db"
 COLLECTION_NAME = "siri_knowledge"
@@ -42,12 +44,16 @@ GROQ_MODEL_NAME = "openai/gpt-oss-20b"
 
 groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
-with open(PKL_PATH, "rb") as f:
-    knowledge = pickle.load(f)
+if os.path.exists(JSON_PATH):
+    with open(JSON_PATH, "r", encoding="utf-8") as f:
+        knowledge = json.load(f)
+elif os.path.exists(PKL_PATH):
+    with open(PKL_PATH, "rb") as f:
+        knowledge = pickle.load(f)
+else:
+    raise FileNotFoundError("Neither data/siri_knowledge.json nor data/siri_knowledge.pkl was found.")
 
 all_chunks = knowledge.get("chunks", [])
-del knowledge
-gc.collect()
 
 chroma_client = chromadb.PersistentClient(
     path=CHROMA_PATH,
@@ -58,10 +64,20 @@ collection = chroma_client.get_or_create_collection(
 )
 
 if collection.count() == 0:
-    raise RuntimeError(
-        f"Chroma collection '{COLLECTION_NAME}' is empty at {CHROMA_PATH}. "
-        "Populate it first by running data/build_knowledge.py before starting the API."
-    )
+    documents = knowledge.get("documents", [])
+    embeddings = knowledge.get("embeddings", [])
+    ids = [c["id"] for c in all_chunks]
+    metadatas = [{"source": c.get("id", "")} for c in all_chunks]
+    if documents and embeddings and ids:
+        collection.add(
+            ids=ids,
+            embeddings=embeddings,
+            documents=documents,
+            metadatas=metadatas
+        )
+
+del knowledge
+gc.collect()
 
 chunk_by_id = {
     item["id"]: item
