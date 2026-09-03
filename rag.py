@@ -2,24 +2,9 @@ import os
 import gc
 import json
 import pickle
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
-os.environ["MALLOC_ARENA_MAX"] = "2"
-os.environ["ANONYMIZED_TELEMETRY"] = "False"
-
-# Initialize PyTorch in single-thread inference configuration first to avoid runtime library duplication
-import torch
-torch.set_num_threads(1)
-try:
-    torch.set_num_interop_threads(1)
-except Exception:
-    pass
-torch.set_grad_enabled(False)
+import time
+import math
+import requests
 
 import chromadb
 from chromadb.config import Settings
@@ -36,10 +21,7 @@ PKL_PATH = "data/siri_knowledge.pkl"
 CHROMA_PATH = "data/chroma_db"
 COLLECTION_NAME = "siri_knowledge"
 
-LOCAL_MODEL_DIR = os.path.join(os.path.dirname(__file__), "models", "all-MiniLM-L6-v2")
-if os.path.isdir(LOCAL_MODEL_DIR):
-    os.environ["HF_HUB_OFFLINE"] = "1"
-EMBEDDING_MODEL_NAME = LOCAL_MODEL_DIR if os.path.isdir(LOCAL_MODEL_DIR) else "all-MiniLM-L6-v2"
+HF_EMBEDDING_API_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2/pipeline/feature-extraction"
 GROQ_MODEL_NAME = "openai/gpt-oss-20b"
 
 groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
@@ -84,53 +66,87 @@ chunk_by_id = {
     for item in all_chunks
 }
 
-_embedding_model = None
 _tfidf_vectorizer = TfidfVectorizer(
     ngram_range=(1, 2),
     lowercase=True
 )
 
-def get_embedding_model():
-    global _embedding_model
+def get_query_embedding(text: str) -> list[float]:
+    hf_token = os.environ.get("HF_API_TOKEN")
+    if not hf_token:
+        raise RuntimeError("HF_API_TOKEN environment variable is not set. Please provide a Hugging Face API token.")
 
-    if _embedding_model is None:
-        from sentence_transformers import SentenceTransformer
+    headers = {
+        "Authorization": f"Bearer {hf_token}",
+        "Content-Type": "application/json"
+    }
+    payload = {"inputs": text}
 
-        _embedding_model = SentenceTransformer(
-            EMBEDDING_MODEL_NAME,
-            device="cpu",
-            model_kwargs={"low_cpu_mem_usage": True}
-        )
-        _embedding_model.eval()
-        gc.collect()
+    response = None
+    for attempt in range(2):
+        try:
+            response = requests.post(HF_EMBEDDING_API_URL, headers=headers, json=payload, timeout=30)
+            if response.status_code == 200:
+                break
+            # Cold-starting (503) or transient failure: wait briefly and retry once
+            if response.status_code == 503 and attempt == 0:
+                time.sleep(2)
+                continue
+            elif not response.ok and attempt == 0:
+                time.sleep(1)
+                continue
+        except requests.RequestException as e:
+            if attempt == 0:
+                time.sleep(1)
+                continue
+            raise RuntimeError(f"Hugging Face Inference API request failed: {e}") from e
 
-    return _embedding_model
+    if response is None or not response.ok:
+        status_code = response.status_code if response is not None else "Unknown"
+        error_text = response.text if response is not None else "No response"
+        raise RuntimeError(f"Hugging Face Inference API failed with status {status_code}: {error_text}")
+
+    data = response.json()
+
+    if isinstance(data, dict) and "error" in data:
+        raise RuntimeError(f"Hugging Face Inference API error: {data['error']}")
+
+    # Handle response shape:
+    # 1D: [float, ...] (already pooled sentence embedding)
+    # 2D: [[float, ...], [float, ...]] (token-level embeddings for a single sentence)
+    # 3D: [[[float, ...], ...]] (token embeddings wrapped in batch dimension)
+    if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list) and len(data[0]) > 0 and isinstance(data[0][0], list):
+        data = data[0]
+
+    if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+        # Mean-pool across token dimension
+        num_tokens = len(data)
+        embedding = [sum(col) / num_tokens for col in zip(*data)]
+    elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], (int, float)):
+        embedding = [float(x) for x in data]
+    else:
+        raise ValueError(f"Unexpected response shape from Hugging Face Inference API: {data}")
+
+    # L2 normalize the vector to match normalize_embeddings=True behavior
+    norm = math.sqrt(sum(x * x for x in embedding))
+    if norm > 0:
+        embedding = [x / norm for x in embedding]
+
+    return embedding
 
 def semantic_search(query, top_k=5):
-    with torch.inference_mode():
-        query_embedding = get_embedding_model().encode(
-            [query],
-            normalize_embeddings=True,
-            show_progress_bar=False,
-            batch_size=1
-        )[0]
+    query_embedding = get_query_embedding(query)
 
     return collection.query(
-        query_embeddings=[query_embedding.tolist()],
+        query_embeddings=[query_embedding],
         n_results=top_k
     )
 
 def rerank(query, top_k=5):
-    with torch.inference_mode():
-        query_embedding = get_embedding_model().encode(
-            [query],
-            normalize_embeddings=True,
-            show_progress_bar=False,
-            batch_size=1
-        )[0]
+    query_embedding = get_query_embedding(query)
 
     results = collection.query(
-        query_embeddings=[query_embedding.tolist()],
+        query_embeddings=[query_embedding],
         n_results=top_k
     )
 

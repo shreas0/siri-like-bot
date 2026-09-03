@@ -3,6 +3,7 @@ uvicorn
 pydantic
 python-dotenv
 chromadb
-sentence-transformers
+requests
 scikit-learn
 groq
+
