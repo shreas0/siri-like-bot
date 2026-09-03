@@ -1,10 +1,27 @@
 import os
+import gc
+import pickle
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["MALLOC_ARENA_MAX"] = "2"
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
-import pickle
+# Initialize PyTorch in single-thread inference configuration first to avoid runtime library duplication
+import torch
+torch.set_num_threads(1)
+try:
+    torch.set_num_interop_threads(1)
+except Exception:
+    pass
+torch.set_grad_enabled(False)
+
 import chromadb
+from chromadb.config import Settings
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,7 +34,10 @@ PKL_PATH = "data/siri_knowledge.pkl"
 CHROMA_PATH = "data/chroma_db"
 COLLECTION_NAME = "siri_knowledge"
 
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+LOCAL_MODEL_DIR = os.path.join(os.path.dirname(__file__), "models", "all-MiniLM-L6-v2")
+if os.path.isdir(LOCAL_MODEL_DIR):
+    os.environ["HF_HUB_OFFLINE"] = "1"
+EMBEDDING_MODEL_NAME = LOCAL_MODEL_DIR if os.path.isdir(LOCAL_MODEL_DIR) else "all-MiniLM-L6-v2"
 GROQ_MODEL_NAME = "openai/gpt-oss-20b"
 
 groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
@@ -25,9 +45,14 @@ groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
 with open(PKL_PATH, "rb") as f:
     knowledge = pickle.load(f)
 
-all_chunks = knowledge["chunks"]
+all_chunks = knowledge.get("chunks", [])
+del knowledge
+gc.collect()
 
-chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
+chroma_client = chromadb.PersistentClient(
+    path=CHROMA_PATH,
+    settings=Settings(anonymized_telemetry=False, is_persistent=True)
+)
 collection = chroma_client.get_or_create_collection(
     name=COLLECTION_NAME
 )
@@ -44,6 +69,10 @@ chunk_by_id = {
 }
 
 _embedding_model = None
+_tfidf_vectorizer = TfidfVectorizer(
+    ngram_range=(1, 2),
+    lowercase=True
+)
 
 def get_embedding_model():
     global _embedding_model
@@ -51,15 +80,24 @@ def get_embedding_model():
     if _embedding_model is None:
         from sentence_transformers import SentenceTransformer
 
-        _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        _embedding_model = SentenceTransformer(
+            EMBEDDING_MODEL_NAME,
+            device="cpu",
+            model_kwargs={"low_cpu_mem_usage": True}
+        )
+        _embedding_model.eval()
+        gc.collect()
 
     return _embedding_model
 
 def semantic_search(query, top_k=5):
-    query_embedding = get_embedding_model().encode(
-        [query],
-        normalize_embeddings=True
-    )[0]
+    with torch.inference_mode():
+        query_embedding = get_embedding_model().encode(
+            [query],
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            batch_size=1
+        )[0]
 
     return collection.query(
         query_embeddings=[query_embedding.tolist()],
@@ -67,10 +105,13 @@ def semantic_search(query, top_k=5):
     )
 
 def rerank(query, top_k=5):
-    query_embedding = get_embedding_model().encode(
-        [query],
-        normalize_embeddings=True
-    )[0]
+    with torch.inference_mode():
+        query_embedding = get_embedding_model().encode(
+            [query],
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            batch_size=1
+        )[0]
 
     results = collection.query(
         query_embeddings=[query_embedding.tolist()],
@@ -97,12 +138,7 @@ def rerank(query, top_k=5):
         )
 
         if pattern_text.strip():
-            vectorizer = TfidfVectorizer(
-                ngram_range=(1, 2),
-                lowercase=True
-            )
-
-            vectors = vectorizer.fit_transform(
+            vectors = _tfidf_vectorizer.fit_transform(
                 [query, pattern_text]
             )
 
@@ -209,4 +245,6 @@ def chat(query):
     if not query or not query.strip():
         return "Please ask me something."
 
-    return generate_response(query.strip())
+    res = generate_response(query.strip())
+    gc.collect()
+    return res
