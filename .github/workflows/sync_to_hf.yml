@@ -11,12 +11,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          lfs: true
 
-      - name: Push to Hugging Face Spaces
+      - name: Push clean tree to Hugging Face Spaces
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git push --force https://siri-pro:$HF_TOKEN@huggingface.co/spaces/siri-pro/siri-bio-bot main
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan hf-deploy
+          git add -A
+          git commit -m "Deploy to Hugging Face Spaces"
+          git push --force https://siri-pro:$HF_TOKEN@huggingface.co/spaces/siri-pro/siri-bio-bot hf-deploy:main
