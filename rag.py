@@ -280,3 +280,7 @@ def chat(query):
     res = generate_response(query.strip())
     gc.collect()
     return res
+
+@app.route("/health", methods=["GET"])
+def health():
+    return {"status": "ok"}, 200
