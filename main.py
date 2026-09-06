@@ -20,6 +20,10 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 @app.get("/")
 def root():
     return {"message": "Siri API is running"}
