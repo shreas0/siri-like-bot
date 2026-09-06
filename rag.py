@@ -9,7 +9,6 @@ import requests
 import chromadb
 from chromadb.config import Settings
 from dotenv import load_dotenv
-from flask import Flask
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -17,9 +16,6 @@ from groq import Groq
 
 
 load_dotenv()
-
-app = Flask(__name__)
-
 
 
 JSON_PATH = "data/siri_knowledge.json"
