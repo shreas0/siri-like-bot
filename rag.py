@@ -222,7 +222,36 @@ def semantic_search(query, top_k=5):
     )
 
 def rerank(query, top_k=5):
-    query_embedding = get_query_embedding(query)
+    try:
+        query_embedding = get_query_embedding(query)
+    except Exception:
+        # Keep chat available when the hosted embedding provider is down.
+        corpus = [
+            " ".join([
+                item.get("question", ""),
+                " ".join(item.get("question_patterns", [])),
+                " ".join(item.get("keywords", [])),
+                item.get("answer", "")
+            ]).strip()
+            for item in all_chunks
+        ]
+        if not corpus:
+            return []
+        try:
+            vectors = _tfidf_vectorizer.fit_transform([query, *corpus])
+            scores = cosine_similarity(vectors[0:1], vectors[1:]).ravel()
+        except ValueError:
+            return []
+        ranked = sorted(
+            ((item["id"], float(score)) for item, score in zip(all_chunks, scores)),
+            key=lambda pair: pair[1],
+            reverse=True
+        )
+        return [
+            {"id": chunk_id, "score": score, "semantic": score, "pattern": 0.0, "keyword": 0.0}
+            for chunk_id, score in ranked[:top_k]
+            if score > 0
+        ]
 
     results = collection.query(
         query_embeddings=[query_embedding],
@@ -338,32 +367,35 @@ Relevant knowledge:
 {answer}
 """
 
-    response = groq_client.chat.completions.create(
-        model=GROQ_MODEL_NAME,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are Siri, Shreshtha Sharma's personal portfolio assistant. "
-                    "Speak naturally in first person as Shreshtha when describing her, "
-                    "with a warm, concise, quietly confident and slightly introverted "
-                    "Gen Z voice. Use only the relevant knowledge supplied in the "
-                    "user message. Never invent personal details or claim to be an AI "
-                    "model. If the knowledge does not answer the question, say so "
-                    "briefly and offer to help with a related portfolio question."
-                )
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        temperature=0.3,
-        reasoning_effort="low",
-        max_tokens=300
-    )
-
-    return response.choices[0].message.content.strip()
+    try:
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Siri, Shreshtha Sharma's personal portfolio assistant. "
+                        "Speak naturally in first person as Shreshtha when describing her, "
+                        "with a warm, concise, quietly confident and slightly introverted "
+                        "Gen Z voice. Use only the relevant knowledge supplied in the "
+                        "user message. Never invent personal details or claim to be an AI "
+                        "model. If the knowledge does not answer the question, say so "
+                        "briefly and offer to help with a related portfolio question."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=0.3,
+            reasoning_effort="low",
+            max_tokens=300
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        # The retrieved portfolio answer is grounded and usable without generation.
+        return answer
 
 def chat(query):
     if not query or not query.strip():
